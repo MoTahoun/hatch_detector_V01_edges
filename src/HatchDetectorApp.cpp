@@ -129,7 +129,7 @@ void startTCPClient()
 HatchDetectorApp::HatchDetectorApp()
 {
     // Set resolution to 720p
-    init_params.camera_resolution = sl::RESOLUTION::HD720;
+    init_params.camera_resolution = sl::RESOLUTION::HD1200;
 
     // Use neural depth mode for better accuracy
     init_params.depth_mode = sl::DEPTH_MODE::NEURAL_PLUS;
@@ -202,32 +202,80 @@ void HatchDetectorApp::run()
 // Preprocess the image to grayscale, blur, and detect edges for contour analysis
 // Preprocess the input image and return the edge-detected image for contour extraction
 // Converts RGBA to grayscale, equalizes histogram, blurs, and applies Canny + morphological close
+// void HatchDetectorApp::preprocessImage(cv::Mat &image, cv::Mat &output)
+// {
+//     cv::Mat gray, edges, blurred, morph;
+
+//     // Convert RGBA to grayscale for edge detection
+//     cv::cvtColor(image, gray, cv::COLOR_RGBA2GRAY);
+
+//     // Improve contrast with histogram equalization
+//     cv::equalizeHist(gray, gray);
+
+//     // Smooth image to reduce noise with Gaussian blur
+//     cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 0);
+
+//     // Detect edges with Canny algorithm
+//     cv::Canny(blurred, edges, 10, 50);
+
+//     // Close small gaps in contours/edges
+//     cv::morphologyEx(edges, morph, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 1);
+
+//     // Show intermediate stages for debuggingcv::imshow("Gray", gray);
+//     cv::imshow("Gray", gray);
+//     cv::imshow("Edges", edges);
+//     cv::imshow("Blurred", blurred);
+//     cv::imshow("Morph", morph);
+
+//     output = morph; // overwrite input image for simplicity
+// }
+
 void HatchDetectorApp::preprocessImage(cv::Mat &image, cv::Mat &output)
 {
-    cv::Mat gray, edges, blurred, morph;
+    cv::Mat bgr, hsv, mask1, mask2, red_mask, red_regions;
+    cv::Mat blurred, edges, morph;
 
-    // Convert RGBA to grayscale for edge detection
-    cv::cvtColor(image, gray, cv::COLOR_RGBA2GRAY);
+    // Step 1: Convert RGBA to BGR
+    if (image.channels() == 4)
+        cv::cvtColor(image, bgr, cv::COLOR_RGBA2BGR);
+    else
+        bgr = image;
 
-    // Improve contrast with histogram equalization
-    cv::equalizeHist(gray, gray);
+    // Step 2: Convert to HSV for better red detection
+    cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
 
-    // Smooth image to reduce noise with Gaussian blur
+    // Step 3: Red color range in HSV
+    cv::inRange(hsv, cv::Scalar(0, 70, 50), cv::Scalar(10, 255, 255), mask1);
+    cv::inRange(hsv, cv::Scalar(170, 70, 50), cv::Scalar(180, 255, 255), mask2);
+
+    red_mask = mask1 | mask2;
+
+    // Step 4: Morphological close to fill gaps in thick borders
+    cv::morphologyEx(red_mask, red_mask, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 2);
+
+    // Step 5: Extract red regions
+    cv::bitwise_and(bgr, bgr, red_regions, red_mask);
+
+    // Step 6: Convert to grayscale
+    cv::Mat gray;
+    cv::cvtColor(red_regions, gray, cv::COLOR_BGR2GRAY);
+
+    // Step 7: Blur to reduce noise
     cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 0);
 
-    // Detect edges with Canny algorithm
-    cv::Canny(blurred, edges, 10, 50);
+    // Step 8: Edge detection on red regions only
+    cv::Canny(blurred, edges, 30, 100);
 
-    // Close small gaps in contours/edges
+    // Optional: morphological closing to connect edges
     cv::morphologyEx(edges, morph, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 1);
 
-    // Show intermediate stages for debuggingcv::imshow("Gray", gray);
-    cv::imshow("Gray", gray);
-    cv::imshow("Edges", edges);
-    cv::imshow("Blurred", blurred);
+    // Debug views
+    cv::imshow("Red Mask", red_mask);
+    cv::imshow("Red Edges", edges);
+    cv::imshow("Closed Edges", morph);
     cv::imshow("Morph", morph);
 
-    output = morph; // overwrite input image for simplicity
+    output = morph;
 }
 
 // Extract contours from the preprocessed image
