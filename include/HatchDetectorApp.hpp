@@ -57,3 +57,7 @@ extern cv::Vec3d latest_orientation;
 
 // TCP background thread
 void startTCPClient();
+
+// TCP message helper methods
+std::string formatFloat(float value, int width, int precision);
+int computeChecksum(const std::string &body);

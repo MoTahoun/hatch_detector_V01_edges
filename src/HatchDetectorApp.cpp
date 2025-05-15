@@ -5,6 +5,7 @@ namespace
     // IP address of the robot's TCP server
     const char *SERVER_IP = "192.168.1.250";
     const int SERVER_PORT = 5000;
+    constexpr int MESSAGE_SIZE = 64;
 }
 
 std::mutex pose_mutex;
@@ -12,53 +13,115 @@ cv::Point3d latest_position;
 cv::Vec3d latest_orientation;
 
 // Starts a background TCP client that connects to a FANUC server.
+std::string formatFloat(float value, int width, int precision)
+{
+    std::ostringstream oss;
+    char sign = value >= 0 ? '+' : '-';
+    value = std::abs(value);
+
+    int int_part = static_cast<int>(value);
+    float frac_part = value - int_part;
+
+    oss << sign
+        << std::setfill('0') << std::setw(width - (1 + 1 + precision)) // width minus sign, dot, decimals
+        << int_part
+        << '.'
+        << std::setw(precision) << static_cast<int>(frac_part * std::pow(10, precision));
+
+    return oss.str();
+}
+
+int computeChecksum(const std::string &body)
+{
+    int sum = 0;
+    for (char c : body.substr(0, 60))
+    {
+        sum += static_cast<unsigned char>(c);
+    }
+    return sum % 256;
+}
+
+// Starts a background TCP client that connects to a FANUC server.
 // When the server sends 0x0001, the latest 6D pose is sent back as comma-separated ASCII.
 void startTCPClient()
 {
-    // Create a TCP socket
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0)
-    {
-        std::cerr << "Socket creation failed" << std::endl;
-        return;
-    }
-
-    // Configure the server address and port
-    sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SERVER_PORT);
-    inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
-
-    // Attempt to connect to the FANUC server
-    if (connect(sock, (sockaddr *)&server_addr, sizeof(server_addr)) < 0)
-    {
-        std::cerr << "Connection to server failed" << std::endl;
-        close(sock);
-        return;
-    }
-
-    std::cout << "Connected to FANUC server." << std::endl;
-
-    // Communication loop: wait for trigger and send latest pose
-    uint8_t buffer[2];
     while (true)
     {
-        int bytes = recv(sock, buffer, 2, MSG_WAITALL);
-        if (bytes != 2 || buffer[0] != 0x00 || buffer[1] != 0x01)
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0)
+        {
+            std::cerr << "Socket creation failed" << std::endl;
+            sleep(2);
             continue;
+        }
 
-        // Safely read shared pose data under mutex protection
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(SERVER_PORT);
+        inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+
+        std::cout << "Attempting to connect to FANUC..." << std::endl;
+        if (connect(sock, (sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+        {
+            std::cerr << "Connection failed. Retrying..." << std::endl;
+            close(sock);
+            sleep(2);
+            continue;
+        }
+
+        std::cout << "Connected to FANUC server." << std::endl;
+
+        char recv_buffer[10] = {};
+        int n = recv(sock, recv_buffer, 10, 0);
+        if (n <= 0)
+        {
+            std::cerr << "Did not receive ping." << std::endl;
+            close(sock);
+            continue;
+        }
+
+        std::string ping(recv_buffer, n);
+        if (ping.find("SEND DATA") == std::string::npos)
+        {
+            std::cerr << "Unexpected ping message: " << ping << std::endl;
+            close(sock);
+            continue;
+        }
+
         pose_mutex.lock();
-
-        // Format the 6D pose as ASCII: x,y,z,roll,pitch,yaw
-        std::ostringstream oss;
-        oss << latest_position.x << "," << latest_position.y << "," << latest_position.z << ","
-            << latest_orientation[0] << "," << latest_orientation[1] << "," << latest_orientation[2] << "\n";
+        std::string message;
+        message += formatFloat(latest_position.x, 9, 4);
+        message += formatFloat(latest_position.y, 9, 4);
+        message += formatFloat(latest_position.z, 9, 4);
+        message += formatFloat(latest_orientation[0], 9, 4);
+        message += formatFloat(latest_orientation[1], 9, 4);
+        message += formatFloat(latest_orientation[2], 9, 4);
         pose_mutex.unlock();
 
-        // Send the pose message to the server
-        std::string message = oss.str();
-        send(sock, message.c_str(), message.size(), 0);
+        while (message.size() < 60)
+            message += ' ';
+
+        int checksum = computeChecksum(message);
+        if (checksum < 10)
+            message += "00";
+        else if (checksum < 100)
+            message += "0";
+        message += std::to_string(checksum);
+        message += "#";
+
+        while (message.size() < 64)
+            message += ' ';
+
+        std::cout << "Sending message (\"" << message << "\")" << std::endl;
+        send(sock, message.c_str(), MESSAGE_SIZE, 0);
+
+        memset(recv_buffer, 0, sizeof(recv_buffer));
+        n = recv(sock, recv_buffer, 10, 0);
+        if (n > 0)
+            std::cout << "Ack: " << std::string(recv_buffer, n) << std::endl;
+
+        close(sock);
+        sleep(1);
     }
 }
 
