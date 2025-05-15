@@ -232,48 +232,51 @@ void HatchDetectorApp::run()
 
 void HatchDetectorApp::preprocessImage(cv::Mat &image, cv::Mat &output)
 {
-    cv::Mat bgr, hsv, mask1, mask2, red_mask, red_regions;
-    cv::Mat blurred, edges, morph;
-
-    // Step 1: Convert RGBA to BGR
+    cv::Mat bgr, hsv, clahe_bgr;
     if (image.channels() == 4)
         cv::cvtColor(image, bgr, cv::COLOR_RGBA2BGR);
     else
         bgr = image;
 
-    // Step 2: Convert to HSV for better red detection
-    cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
+    // 1. Improve lighting consistency using CLAHE on each channel
+    std::vector<cv::Mat> bgr_channels;
+    cv::split(bgr, bgr_channels);
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+    for (int i = 0; i < 3; ++i)
+        clahe->apply(bgr_channels[i], bgr_channels[i]);
+    cv::merge(bgr_channels, clahe_bgr);
 
-    // Step 3: Red color range in HSV
-    cv::inRange(hsv, cv::Scalar(0, 70, 50), cv::Scalar(10, 255, 255), mask1);
-    cv::inRange(hsv, cv::Scalar(170, 70, 50), cv::Scalar(180, 255, 255), mask2);
+    // 2. Convert to HSV
+    cv::cvtColor(clahe_bgr, hsv, cv::COLOR_BGR2HSV);
 
-    red_mask = mask1 | mask2;
+    // 3. Wide range for red–orange detection under various lighting
+    cv::Mat mask1, mask2, mask3, red_mask;
+    // orange to light red
+    cv::inRange(hsv, cv::Scalar(5, 50, 50), cv::Scalar(18, 255, 255), mask1);
+    // dark red
+    cv::inRange(hsv, cv::Scalar(0, 50, 30), cv::Scalar(5, 255, 255), mask2);
+    // upper red (wrap-around hue)
+    cv::inRange(hsv, cv::Scalar(170, 50, 30), cv::Scalar(180, 255, 255), mask3);
 
-    // Step 4: Morphological close to fill gaps in thick borders
+    red_mask = mask1 | mask2 | mask3;
+
+    // 4. Clean up with morphological closing
     cv::morphologyEx(red_mask, red_mask, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 2);
 
-    // Step 5: Extract red regions
-    cv::bitwise_and(bgr, bgr, red_regions, red_mask);
+    // 5. Isolate red regions
+    cv::Mat red_regions;
+    cv::bitwise_and(clahe_bgr, clahe_bgr, red_regions, red_mask);
 
-    // Step 6: Convert to grayscale
-    cv::Mat gray;
+    // 6. Grayscale, blur, Canny
+    cv::Mat gray, blurred, edges, morph;
     cv::cvtColor(red_regions, gray, cv::COLOR_BGR2GRAY);
-
-    // Step 7: Blur to reduce noise
     cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 0);
-
-    // Step 8: Edge detection on red regions only
     cv::Canny(blurred, edges, 30, 100);
-
-    // Optional: morphological closing to connect edges
     cv::morphologyEx(edges, morph, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 1);
 
-    // Debug views
-    cv::imshow("Red Mask", red_mask);
-    cv::imshow("Red Edges", edges);
-    cv::imshow("Closed Edges", morph);
-    cv::imshow("Morph", morph);
+    // Debug
+    cv::imshow("CLAHE Red Mask", red_mask);
+    cv::imshow("CLAHE Red Edges", morph);
 
     output = morph;
 }
