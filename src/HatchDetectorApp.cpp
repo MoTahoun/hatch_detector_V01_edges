@@ -238,42 +238,73 @@ void HatchDetectorApp::preprocessImage(cv::Mat &image, cv::Mat &output)
     else
         bgr = image;
 
-    // 1. Define reference red color in BGR
-    cv::Vec3b reference_red(40, 40, 200); // blue, green, red
-    int color_thresh = 60;                // increase if too strict
+    // Resize for faster k-means (keep ratio)
+    cv::Mat small;
+    cv::resize(bgr, small, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+    cv::Mat samples = small.reshape(1, small.rows * small.cols);
+    samples.convertTo(samples, CV_32F);
 
-    // 2. Create binary mask based on color similarity
+    // Run K-means to find 4 dominant colors
+    int K = 4;
+    cv::Mat labels, centers;
+    cv::kmeans(samples, K, labels,
+               cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 10, 1.0),
+               3, cv::KMEANS_PP_CENTERS, centers);
+
+    // Pick the center with highest red channel
+    int best_idx = 0;
+    float max_r = 0;
+    for (int i = 0; i < K; ++i)
+    {
+        float b = centers.at<float>(i, 0);
+        float g = centers.at<float>(i, 1);
+        float r = centers.at<float>(i, 2);
+        if (r > max_r && r > g + 30 && r > b + 30) // ensure it's reddish
+        {
+            max_r = r;
+            best_idx = i;
+        }
+    }
+
+    // Extract actual BGR color of detected red
+    cv::Vec3b reference_red(
+        static_cast<uchar>(centers.at<float>(best_idx, 0)),
+        static_cast<uchar>(centers.at<float>(best_idx, 1)),
+        static_cast<uchar>(centers.at<float>(best_idx, 2)));
+
+    // Compute red mask based on Euclidean distance
+    int color_thresh = 60;
     cv::Mat mask(bgr.size(), CV_8UC1, cv::Scalar(0));
     for (int y = 0; y < bgr.rows; ++y)
     {
         for (int x = 0; x < bgr.cols; ++x)
         {
-            cv::Vec3b pixel = bgr.at<cv::Vec3b>(y, x);
+            cv::Vec3b pix = bgr.at<cv::Vec3b>(y, x);
             int dist = std::sqrt(
-                std::pow(pixel[0] - reference_red[0], 2) +
-                std::pow(pixel[1] - reference_red[1], 2) +
-                std::pow(pixel[2] - reference_red[2], 2));
+                std::pow(pix[0] - reference_red[0], 2) +
+                std::pow(pix[1] - reference_red[1], 2) +
+                std::pow(pix[2] - reference_red[2], 2));
             if (dist < color_thresh)
                 mask.at<uchar>(y, x) = 255;
         }
     }
 
-    // 3. Clean the mask
+    // Clean mask and extract red area
     cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 2);
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, cv::Mat(), cv::Point(-1, -1), 1);
-
-    // 4. Optional: restrict edge detection to red zones only
-    cv::Mat red_only, gray, blurred, edges, morph;
+    cv::Mat red_only;
     cv::bitwise_and(bgr, bgr, red_only, mask);
+
+    // Canny edge detection
+    cv::Mat gray, blurred, edges, morph;
     cv::cvtColor(red_only, gray, cv::COLOR_BGR2GRAY);
     cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 0);
     cv::Canny(blurred, edges, 30, 100);
     cv::morphologyEx(edges, morph, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 1);
 
-    // Debug views
-    cv::imshow("Red Color Mask", mask);
-    cv::imshow("Red-Only", red_only);
-    cv::imshow("Canny Edges (masked)", morph);
+    // Debug
+    cv::imshow("Red Mask (KMeans)", mask);
+    cv::imshow("Red Only (KMeans)", red_only);
+    cv::imshow("Edges from Red", morph);
 
     output = morph;
 }
